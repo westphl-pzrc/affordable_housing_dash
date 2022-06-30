@@ -1,0 +1,333 @@
+---
+title: "NHPD Dashboard Steps"
+author: "Nissim Lebovits"
+date: "6/29/2022"
+output: 
+  html_document:
+    toc: true
+    toc_float: true
+    code_folding: hide
+---
+
+# 1) Summary
+This document walks through how to build the Promise Zone [National Housing Preservation Database dashboard](https://storymaps.arcgis.com/stories/b75ac94d30d941f8ab0e31c3f054f090) in ArcGIS.
+It does two things: 1) explains how the dashboard was made, and 2) actually provides the code necessary for
+preparing the data and the graphics. These elements will still have to be uploaded to ArcGIS to actually create the dashboard,
+but this markdown document should make clear how to create and use them.
+
+It lays out five steps:
+
+1) Importing and cleaning National Housing Preservation Database data
+2) Importing and cleaning American Community Survey data
+3) Making graphics for the dashboard
+4) Automating text with embedded statistics for the dashboard
+5) Uploading and assembling all these components in ArcGIS
+
+```{r setup, include = T, echo = TRUE, message = FALSE, warning = FALSE, error = FALSE, results = "hide"}
+#If you are at a City office or on your VPN, you will need to load the ‘curl’ #package and run these three lines of code to get around the proxy server and #be able to use the census API
+#function to get around proxy server for tidycensus
+#library(curl)
+
+#companyproxy <- curl::ie_proxy_info("proxy.phila.gov:8080")$Proxy
+#Sys.setenv(http_proxy=companyproxy)
+#Sys.setenv(https_proxy=companyproxy)
+
+#install.packages("devtools")
+#devtools::install_github("CityOfPhiladelphia/rphl")
+
+#install.packages("janitor")
+
+library(tidyverse)
+library(acs) #to import american community survey data
+library(tidycensus) #to import american community survey data
+library(readxl) #to read the excel spreadsheet of nhpd data
+library(sf) #for spatial data
+library(rphl)
+library(forcats)
+library(janitor) #to clean dirty excel files
+
+require("knitr")
+opts_knit$set(root.dir = "C:/Users/Nissim.Lebovits/OneDrive - City of Philadelphia/Desktop/Transition Documents/Data/R Scripts and Datasets/Housing")
+```
+
+
+# 2) NHPD Data: Import & Wrangle
+NHPD data must be manually downloaded as an Excel file [here](https://nhpd.preservationdatabase.org/Data). 
+You will need to register for an account, but this is free for government agencies. Select the dataset titled "Inconclusive and Active Properties PA", then:
+
+1. Download NHPD data
+2. Import Promise Zone boundaries
+3. Spatial filter
+4. Clean categorical data
+5. Add extra columns
+6. Export to Esri shapefile
+
+```{r nhpd data import, include = TRUE, echo = TRUE, message = FALSE, warning = FALSE, error = FALSE, results = "hide"}
+#import nhpd data for pennsylvania
+all_nhpd = read_excel("./Inconclusive and Active Properties PA.xlsx") |>
+              clean_names()
+
+#filter for in philadelphia; convert to sf
+phl_nhpd_sf = all_nhpd |>
+                filter(city == "Philadelphia") |>
+                st_as_sf(coords = c("longitude", "latitude"), 
+                         crs = "EPSG:4326")
+
+#fix typo in TargetTenantType column
+phl_nhpd_sf$target_tenant_type[phl_nhpd_sf$target_tenant_type == "Eldery or Disabled"] = "Elderly or disabled"
+
+#create column for earliestendyear
+phl_nhpd_sf$earliest_end_year = lubridate::year(phl_nhpd_sf$earliest_end_date)
+
+#import the pz; use to filter phl data
+pz = read_sf("C:/Users/Nissim.Lebovits/OneDrive - City of Philadelphia/Desktop/Transition Documents/Data/R Scripts and Datasets/General Boundaries/Shapefiles/PZ_Shapefile",
+             "PZ_Boundaries", stringsAsFactors = FALSE) |>
+            st_transform(crs = st_crs("EPSG:4326"))
+
+#Create a new column for a categorical variable indicating whether or not each site is in the Promise Zone. 
+
+pz_nhpd_sf = phl_nhpd_sf[pz, ]
+
+pz_nhpd_sf$in_pz = "true"
+
+non_pz_nhpd_sf = phl_nhpd_sf[pz, , op = st_disjoint]
+
+non_pz_nhpd_sf$in_pz = "false"
+
+phl_nhpd_sf_full = rbind(pz_nhpd_sf, non_pz_nhpd_sf)
+
+
+#select the columns that you want
+phl_nhpd_full_forwrite = phl_nhpd_sf_full |>
+                            dplyr::select(property_name,
+                                          property_address,
+                                          total_units,
+                                          earliest_end_year,
+                                          owner,
+                                          owner_type,
+                                          manager_name,
+                                          manager_type,
+                                          target_tenant_type)
+
+#esri shapefiles do not accept null values (NAs),
+#so we'll split the data into an expiring layer and a non-expiring layer
+#and then upload them to the same map
+phl_nhpd_expiring = phl_nhpd_full_forwrite |>
+                      filter(!is.na(earliest_end_year))
+
+st_write(phl_nhpd_expiring, "./phl_nhpd_expiring.shp")
+
+phl_nhpd_non_expiring = phl_nhpd_full_forwrite |>
+                            filter(is.na(earliest_end_year))
+
+st_write(phl_nhpd_non_expiring, "./phl_nhpd_non_expiring.shp")
+```
+
+# 3) ACS Data: Import & Wrangle
+In this step, we're importing American Community Survey data to compare the Promise Zone to Philadelphia as a whole. We use area-weighted spatial interpolation to estimate numbers for the Promise Zone, and then perform some final simple calculations.
+```{r acs import, include = T, echo = TRUE, message = FALSE, warning = FALSE, error = FALSE, results = "hide"}
+#import data by tract for interpolation
+phl_tract_acs_data = get_acs(geography = "tract", 
+                   year = 2020,
+                   variables = c(
+                                  "B11001_001E", #Total number of households
+                                  "B25070_007E", #Rent 30.0 to 34.9 percent
+                                  "B25070_008E", #Rent 35.0 to 39.9 percent
+                                  "B25070_009E", #Rent 40.0 to 49.9 percent
+                                  "B25070_010E"), #Rent 50.0 percent or more
+                   geometry = T, 
+                   state = "PA", 
+                   county = "Philadelphia", 
+                   output = "wide") |>
+                   rename(tot_hh = B11001_001E) |>
+                   mutate(tot_rentburd_hh = B25070_007E +
+                                            B25070_008E +
+                                            B25070_009E +
+                                            B25070_010E)|>
+            st_transform(crs = st_crs("EPSG:4326"))
+
+#import full city data
+phl_county_acs_data = get_acs(geography = "county", 
+                   year = 2020,
+                   variables = c(
+                                  "B11001_001E", #Total number of households
+                                  "B25070_007E", #Rent 30.0 to 34.9 percent
+                                  "B25070_008E", #Rent 35.0 to 39.9 percent
+                                  "B25070_009E", #Rent 40.0 to 49.9 percent
+                                  "B25070_010E"), #Rent 50.0 percent or more
+                   geometry = T, 
+                   state = "PA", 
+                   county = "Philadelphia", 
+                   output = "wide") |>
+                   rename(tot_hh = B11001_001E) |>
+                   mutate(tot_rentburd_hh = B25070_007E +
+                                            B25070_008E +
+                                            B25070_009E +
+                                            B25070_010E)|>
+            st_transform(crs = st_crs("EPSG:4326"))
+
+
+#interpolate pz data
+pz_acs_data = st_interpolate_aw(phl_tract_acs_data[3:14], pz, ext = T)
+
+pz_acs_data = pz_acs_data |>
+                dplyr::select(tot_hh, tot_rentburd_hh)
+
+pz_acs_data$geography = "Promise Zone"
+
+phl_county_acs_data = phl_county_acs_data |>
+                dplyr::select(tot_hh, tot_rentburd_hh)
+
+phl_county_acs_data$geography = "Philadelphia"
+
+acs_data_for_charts = rbind(pz_acs_data, phl_county_acs_data)
+
+acs_data_for_charts = acs_data_for_charts |>
+                        mutate(pct_rentburd = tot_rentburd_hh/tot_hh*100)
+```
+
+
+
+# 4) Make Graphics
+The code below will make the appropriate charts to embed in the ArcGIS storymap. All you have to do is right-click them, "save as", and make sure to add ".png" to the file name that you give them. You can then upload the resulting .png files to ArcGIS and embed them in the NHPD storymap.
+```{r rentburd chart, include = T, echo = TRUE, message = FALSE, warning = FALSE, error = FALSE, results = "hide"}
+  ggplot(acs_data_for_charts) +
+  geom_col(aes(x = geography, y = pct_rentburd), 
+           fill = "#7fb0ac",
+           alpha = 0.7) +
+  geom_text(aes(x = geography, y = pct_rentburd, label = round(pct_rentburd, digits = 1)), vjust = 1.5) +
+  labs(title = "Rent Burden",
+       y = "Rent Burden (%)") +
+  theme_phl(base_size = 14) +
+  theme(aspect.ratio = 1,
+        axis.title.x = element_blank())
+```
+
+```{r tenant type hist, include = T, echo = TRUE, message = FALSE, warning = FALSE, error = FALSE, results = "hide"}
+target_tenant_hist  = phl_nhpd_sf_full |>
+                        filter(in_pz == "true") |>
+                        group_by(target_tenant_type) |>
+                        summarise(total_site_units = sum(total_units))
+
+
+ggplot(target_tenant_hist) +
+  geom_col(aes(x = reorder(target_tenant_type, -total_site_units), y = total_site_units), 
+           fill = "#7fb0ac",
+           alpha = 0.7) +
+  geom_text(aes(x = target_tenant_type, y = total_site_units, label = total_site_units), vjust = -.25) +
+  labs(title = "Promise Zone Affordable Housing by Tenant Type",
+       x = "Target Tenant Type",
+       y = "Total Units") +
+  theme_phl(base_size = 14)
+  
+```
+
+```{r endyear density, include = T, echo = TRUE, message = FALSE, warning = FALSE, error = FALSE, results = "hide"}
+ggplot(phl_nhpd_sf_full[phl_nhpd_sf_full$in_pz == "true", ], aes(x=earliest_end_year, y = total_units)) + 
+  geom_col(aes(x=earliest_end_year, y = total_units), 
+           fill = "#7fb0ac",
+           alpha = 0.7) +
+  labs(title = "Promise Zone Affordable Housing by Expiration Year",
+       x = "Expiration Year",
+       y = "Total Units") +
+  theme_phl(base_size = 14)
+```
+
+# 5) Text for Dashboard with Embedded Stats
+          
+```{r stats, include = T, echo = TRUE, message = FALSE, warning = FALSE, error = FALSE, results = "hide"}
+today = lubridate::today()
+
+phl_affordable_housing = as.integer(sum(phl_nhpd_sf_full$total_units))
+  
+pz_affordable_housing = as.integer(sum(phl_nhpd_sf_full$total_units[phl_nhpd_sf_full$in_pz == "true"]))
+
+pct_pz_affordable_housing = round(sum(phl_nhpd_sf_full$total_units[phl_nhpd_sf_full$in_pz == "true"]) / sum(phl_nhpd_sf_full$total_units)*100, digits = 1)
+
+pct_pz_total_hh = round(sum(acs_data_for_charts$tot_hh[acs_data_for_charts$geography == "Promise Zone"]) / sum(acs_data_for_charts$tot_hh[acs_data_for_charts$geography == "Philadelphia"])*100, digits = 1)
+
+pz_rent_burden = round(sum(acs_data_for_charts$pct_rentburd[acs_data_for_charts$geography == "Promise Zone"]), digits = 1)
+
+phl_rent_burden = round(sum(acs_data_for_charts$pct_rentburd[acs_data_for_charts$geography == "Philadelphia"]), digits = 1)
+
+pz_affordable_units = sum(phl_nhpd_sf_full$total_units[phl_nhpd_sf_full$in_pz == "true"])
+
+pz_family_units = round((sum(na.omit(pz_nhpd_sf$total_units[pz_nhpd_sf$target_tenant_type == "Family"]))) /(sum(phl_nhpd_sf_full$total_units[phl_nhpd_sf_full$in_pz == "true"]))*100, digits = 1)
+
+pz_elderly_units = round((sum(na.omit(pz_nhpd_sf$total_units[pz_nhpd_sf$target_tenant_type == "Elderly"]))) /(sum(phl_nhpd_sf_full$total_units[phl_nhpd_sf_full$in_pz == "true"]))*100, digits = 1)
+
+disabled_or_combo = round(((sum(phl_nhpd_sf_full$total_units[phl_nhpd_sf_full$in_pz == "true"])) -
+                  (sum(pz_nhpd_sf$total_units[is.na(pz_nhpd_sf$target_tenant_type)]) +
+                   sum(na.omit(pz_nhpd_sf$total_units[pz_nhpd_sf$target_tenant_type == "Family"])) +
+                   sum(na.omit(pz_nhpd_sf$total_units[pz_nhpd_sf$target_tenant_type == "Elderly"])))) /
+                  (sum(phl_nhpd_sf_full$total_units[phl_nhpd_sf_full$in_pz == "true"])) * 100, digits = 1)
+
+no_target = round(sum(pz_nhpd_sf$total_units[is.na(pz_nhpd_sf$target_tenant_type)])  /
+                  sum(phl_nhpd_sf_full$total_units[phl_nhpd_sf_full$in_pz == "true"]) * 100, digits = 1)
+
+less_than_five_exp = pz_nhpd_sf |>
+                      filter(as.integer(earliest_end_year) <= (as.integer(lubridate::year(lubridate::today()))+ 5)) |>
+                      summarise(sum = sum(total_units)) |>
+                      as.data.frame() |>
+                      dplyr::select(-geometry)
+
+five_to_ten_exp = pz_nhpd_sf |>
+                      filter(as.integer(earliest_end_year) >= (as.integer(lubridate::year(lubridate::today()))+ 6) &
+                              as.integer(earliest_end_year) <= (as.integer(lubridate::year(lubridate::today())))+ 10) |>
+                      summarise(sum = sum(total_units)) |>
+                      as.data.frame() |>
+                      dplyr::select(-geometry)
+
+ten_to_twenty_exp = pz_nhpd_sf |>
+                      filter(as.integer(earliest_end_year) >= (as.integer(lubridate::year(lubridate::today()))+ 11) &
+                              as.integer(earliest_end_year) <= (as.integer(lubridate::year(lubridate::today())))+ 20) |>
+                      summarise(sum = sum(total_units)) |>
+                      as.data.frame() |>
+                      dplyr::select(-geometry)
+
+twenty_one_plus = pz_nhpd_sf |>
+                      filter(as.integer(earliest_end_year) >= (as.integer(lubridate::year(lubridate::today()))+ 21)) |>
+                      summarise(sum = sum(total_units)) |>
+                      as.data.frame() |>
+                      dplyr::select(-geometry)
+                                               
+no_exp = sum(pz_nhpd_sf$total_units[is.na(pz_nhpd_sf$earliest_end_year)])
+```
+*Below is the text for the dashboard. I've coded it so that it automatically incorporates the relevant statistical calculations. The Markdown document will spit out just the text, but you can unhide code to see the calculations themselves.*
+
+This dashboard displays Philadelphia-data from the National Housing Preservation Database (NHPD). The map tool can be used to identify individual housing developments; points are sized according to the total units at a development, and colored according to how soon they will expire.
+
+After the dashboard, an interactive map shows rent burden levels by census tract across Philadelphia. Additional charts compare rent burden in Philadelphia to rent burden in the Promise Zone specifically, and break down affordable housing units in the Promise Zone by target tenant and anticipated expiration year.
+
+As of `r today`, the NHPD counted `r phl_affordable_housing` total units of affordable housing in Philadelphia. Of these, `r pz_affordable_housing`--or `r pct_pz_affordable_housing`%--are in the Promise Zone. 
+While the Promise Zone only accounts for `r pct_pz_total_hh`% of Philadelphia households, it faces disproportionately high rates of rent burden: `r pz_rent_burden`% in the Promise Zone versus only `r phl_rent_burden`% citywide.
+
+Affordable housing in the Promise Zone targets different types of tenants. Of the `r pz_affordable_units` affordable units in the Promise Zone, `r pz_family_units`% are aimed at families, and `r pz_elderly_units`% at the elderly. A further `r disabled_or_combo`% are aimed at disabled people, or some combination of all these categories. Finally, `r no_target`% of units have no specific target. 
+
+Out of all `r pz_affordable_units` affordable units in the Promise Zone, `r less_than_five_exp[1]` are due to expire in the next 5 years. Another `r five_to_ten_exp[1]` will expire in 6 to 10 years, and `r ten_to_twenty_exp[1]` in 11 to 20 years, and `r twenty_one_plus[1]` in 21 years or later. A total of `r no_exp` have no expiration date.
+
+# 6) Putting It Together
+Once you have all these pieces ready to go, you can upload the relevant pieces to ArcGIS and then assemble everything in the StoryMap.
+
+## i) Uploading and Formatting NHPD Shapefiles
+1. Open ArcGIS Pro
+2. Start a new, blank project
+3. In the "Contents" section, right click the basemap layers and remove them.
+4. Under "Map" in the toolbar, select "Add New Data". Navigate to the filepath for phl_nhpd_expiring.shp and import the file.
+5. Right click on the phl_nhpd_full layer and select "Attribute Table". Right click on any column name in the table and then click on "Fields". In "Fields", go to the "Alias" column and rename each column according to what you want the popup name to be. I went with "Name", "Address", "Total Units", "Earliest Expiration Year", "Owner", "Owner Type", "Manager", "Manager Type", and "Target Tenants". Save the map.
+6. Right click the phl_nhpd_full layer and select "Symbology". Set the primary symbology to "proportional symbols", and the field to "ttl_nts" (originally "total_units"--remember that Esri shapefiles have limits to the length of column names, so it will automatically trim them). Set the minimum size to 5 and the max size to 50. Save.
+7. Click on "vary symbology by attribute", then open the "color" subtab and change "field" to "erlst_ (originally "earliest_end_year"). Set the color scheme to yellow-green-blue. Then, next to "template", right click the little dot and, under "color properties", set "transparency" to 50%. Finally, make sure to check the box for "show legend". Don't forget to save.
+8. Right click on "Map" under contents, and then select "Properties". Under "general", make sure to check off "Allow assignment of unique numeric IDs for sharing web layers".
+9. Repea steps 4 through 8 for phl_nhpd_non_expiring, except do NOT add the "vary symbolgy by attribute" with the color setting. Just make the color for all of these points gray. (Do this by click the dot next to "Template"). 
+9. Navigate to the "Share" tab and click "Web Layer" (NOT "Web Map"). Set the name to something like NHPD Housing for Dashboard and the summary to something like "Data from the National Housing Preservation Database cleaned and formatted for a Promise Zone dashboard." Tags might include "Promise Zone", "Housing", etc. Set the layer type to "feature". Set the location to your folder, and set sharing to Everyone and City of Philadelphia, and then click "publish".
+10. In your browser, navigate to phl.maps.arcgis.com and go to "content". Open the layer you just created ("NHPD Housing for Dashboard") in Map Viewer. Title the map "NHPD Housing for Dashboard" and save. 
+11. A city basemap should automatically be present. You'll also want to add the Promise Zone boundaries. Do this by going to "Add", then "search for layers". Select "my organization" and search for "Promise Zone". Select the "Philadelphia_Promise_Zone" layer uploaded by maps.phl.data. Navigate to the "Details" tab and drag the housing layer to be on top of the Promise Zone layer. Save. 
+12. Click on the "home" tab in the top left corner. Next, click the little square of nine dots just next to your profile picture in the top right corner of the screen. Select "Dashboards", and then "create dashboard." Name it something like "NHPD Housing Dashboard (June 2022)", and add the tags "Promise Zone" and "Housing".
+13. Click the plus sign in middle of your dashboard template, and then select the "NHPD Housing for Dashboard" web map that you created in steps 10 and 11. In settings, turn on popups, the legend, and the search and zoom features. Click done and then save the dashboard.
+14. 
+
+## ii) Uploading Graphics
+
+## iii) Adding Text
+
+## iv) Publishing the Dashboard
