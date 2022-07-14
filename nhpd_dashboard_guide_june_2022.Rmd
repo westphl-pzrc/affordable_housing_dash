@@ -1,7 +1,7 @@
 ---
 title: "NHPD Dashboard Steps"
 author: "Nissim Lebovits"
-date: "6/29/2022"
+date: "7/14/2022"
 output: 
   html_document:
     toc: true
@@ -22,6 +22,8 @@ It lays out five steps:
 3) Making graphics for the dashboard
 4) Automating text with embedded statistics for the dashboard
 5) Uploading and assembling all these components in ArcGIS
+
+Note: this walkthrough is not perfect. There are almost definitely some steps that I forgot to include, and you will need to fiddle with some things to get them to look exactly how you want. There are simply some limits to what it's possible to build in ArcGIS. My hope is that this walkthrough will make it much easier for you to manually update the dashboard, though, and will serve as a foundation on which you can improve.
 
 ```{r setup, include = T, echo = TRUE, message = FALSE, warning = FALSE, error = FALSE, results = "hide"}
 #If you are at a City office or on your VPN, you will need to load the ‘curl’ #package and run these three lines of code to get around the proxy server and #be able to use the census API
@@ -190,6 +192,24 @@ acs_data_for_charts = acs_data_for_charts |>
 
 # 4) Make Graphics
 The code below will make the appropriate charts to embed in the ArcGIS storymap. All you have to do is right-click them, "save as", and make sure to add ".png" to the file name that you give them. You can then upload the resulting .png files to ArcGIS and embed them in the NHPD storymap.
+```{r assisted units pie chart, include = T, echo = TRUE, message = FALSE, warning = FALSE, error = FALSE, results = "hide"}
+  phl_nhpd_sf_full |>
+  group_by(in_pz) |>
+  summarise(total_units = sum(total_units)) |>
+  ggplot(aes(x = "", y = total_units, fill = in_pz)) +
+  geom_col(color = NA, alpha = 0.5) +
+  geom_text(aes(label = total_units),
+             position = position_stack(vjust = 0.5),
+             alpha = 1) + 
+  coord_polar(theta = "y") +
+  scale_fill_manual(values = c("#5b6983", "#7fb0ac"), 
+                    labels = c("Outside Promise Zone", "In Promise Zone")) +
+  labs(title = "Assisted Housing Units in Philadelphia") +
+  theme_void() +
+  theme(plot.title = element_text(hjust = 0.5),
+        legend.title = element_blank())
+```
+
 ```{r rentburd chart, include = T, echo = TRUE, message = FALSE, warning = FALSE, error = FALSE, results = "hide"}
   ggplot(acs_data_for_charts) +
   geom_col(aes(x = geography, y = pct_rentburd), 
@@ -215,10 +235,10 @@ ggplot(target_tenant_hist) +
            fill = "#7fb0ac",
            alpha = 0.7) +
   geom_text(aes(x = target_tenant_type, y = total_site_units, label = total_site_units), vjust = -.25) +
-  labs(title = "Promise Zone Affordable Housing by Tenant Type",
+  labs(title = "Promise Zone Assisted Housing by Tenant Type",
        x = "Target Tenant Type",
        y = "Total Units") +
-  theme_phl(base_size = 14)
+  theme_phl(base_size = 14) 
   
 ```
 
@@ -227,10 +247,11 @@ ggplot(phl_nhpd_sf_full[phl_nhpd_sf_full$in_pz == "true", ], aes(x=earliest_end_
   geom_col(aes(x=earliest_end_year, y = total_units), 
            fill = "#7fb0ac",
            alpha = 0.7) +
-  labs(title = "Promise Zone Affordable Housing by Expiration Year",
+  labs(title = "Promise Zone Assisted Housing by Expiration Year",
        x = "Expiration Year",
        y = "Total Units") +
-  theme_phl(base_size = 14)
+  theme_phl(base_size = 14) +
+  theme(aspect.ratio = 0.75)
 ```
 
 # 5) Text for Dashboard with Embedded Stats
@@ -238,11 +259,11 @@ ggplot(phl_nhpd_sf_full[phl_nhpd_sf_full$in_pz == "true", ], aes(x=earliest_end_
 ```{r stats, include = T, echo = TRUE, message = FALSE, warning = FALSE, error = FALSE, results = "hide"}
 today = lubridate::today()
 
-phl_affordable_housing = as.integer(sum(phl_nhpd_sf_full$total_units))
+phl_assisted_housing = as.integer(sum(phl_nhpd_sf_full$total_units))
   
-pz_affordable_housing = as.integer(sum(phl_nhpd_sf_full$total_units[phl_nhpd_sf_full$in_pz == "true"]))
+pz_assisted_housing = as.integer(sum(phl_nhpd_sf_full$total_units[phl_nhpd_sf_full$in_pz == "true"]))
 
-pct_pz_affordable_housing = round(sum(phl_nhpd_sf_full$total_units[phl_nhpd_sf_full$in_pz == "true"]) / sum(phl_nhpd_sf_full$total_units)*100, digits = 1)
+pct_pz_assisted_housing = round(sum(phl_nhpd_sf_full$total_units[phl_nhpd_sf_full$in_pz == "true"]) / sum(phl_nhpd_sf_full$total_units)*100, digits = 1)
 
 pct_pz_total_hh = round(sum(acs_data_for_charts$tot_hh[acs_data_for_charts$geography == "Promise Zone"]) / sum(acs_data_for_charts$tot_hh[acs_data_for_charts$geography == "Philadelphia"])*100, digits = 1)
 
@@ -250,7 +271,7 @@ pz_rent_burden = round(sum(acs_data_for_charts$pct_rentburd[acs_data_for_charts$
 
 phl_rent_burden = round(sum(acs_data_for_charts$pct_rentburd[acs_data_for_charts$geography == "Philadelphia"]), digits = 1)
 
-pz_affordable_units = sum(phl_nhpd_sf_full$total_units[phl_nhpd_sf_full$in_pz == "true"])
+pz_assisted_units = sum(phl_nhpd_sf_full$total_units[phl_nhpd_sf_full$in_pz == "true"])
 
 pz_family_units = round((sum(na.omit(pz_nhpd_sf$total_units[pz_nhpd_sf$target_tenant_type == "Family"]))) /(sum(phl_nhpd_sf_full$total_units[phl_nhpd_sf_full$in_pz == "true"]))*100, digits = 1)
 
@@ -295,21 +316,46 @@ no_exp = sum(pz_nhpd_sf$total_units[is.na(pz_nhpd_sf$earliest_end_year)])
 ```
 *Below is the text for the dashboard. I've coded it so that it automatically incorporates the relevant statistical calculations. The Markdown document will spit out just the text, but you can unhide code to see the calculations themselves.*
 
-This dashboard displays Philadelphia-data from the National Housing Preservation Database (NHPD). The map tool can be used to identify individual housing developments; points are sized according to the total units at a development, and colored according to how soon they will expire.
+This dashboard displays Philadelphia data on federally-assisted multi-family housing taken from the [National Housing Preservation Database (NHPD)](https://nhpd.preservationdatabase.org/).
 
-After the dashboard, an interactive map shows rent burden levels by census tract across Philadelphia. Additional charts compare rent burden in Philadelphia to rent burden in the Promise Zone specifically, and break down affordable housing units in the Promise Zone by target tenant and anticipated expiration year.
+The map tool can be used to identify individual housing developments:
+•	points are sized according to the total units at a development
+•	points are colored according to how soon they will expire
 
-As of `r today`, the NHPD counted `r phl_affordable_housing` total units of affordable housing in Philadelphia. Of these, `r pz_affordable_housing`--or `r pct_pz_affordable_housing`%--are in the Promise Zone. 
-While the Promise Zone only accounts for `r pct_pz_total_hh`% of Philadelphia households, it faces disproportionately high rates of rent burden: `r pz_rent_burden`% in the Promise Zone versus only `r phl_rent_burden`% citywide.
+As of `r today`, the NHPD counted `r phl_assisted_housing` total units of federally-assisted multi-family housing in Philadelphia. Of these, `r pz_assisted_housing` (`r pct_pz_assisted_housing`%) are in the Promise Zone.
 
-Affordable housing in the Promise Zone targets different types of tenants. Of the `r pz_affordable_units` affordable units in the Promise Zone, `r pz_family_units`% are aimed at families, and `r pz_elderly_units`% at the elderly. A further `r disabled_or_combo`% are aimed at disabled people, or some combination of all these categories. Finally, `r no_target`% of units have no specific target. 
+The Promise Zone faces disproportionately high rates of rent burden: `r pz_rent_burden`% in the Promise Zone versus `r phl_rent_burden`% citywide.
+assisted housing in the Promise Zone targets different types of tenants. Out of `r pz_assisted_units` total assisted units:
+•	`r pz_family_units`% are for families
+•	`r pz_elderly_units`% are for older adults
+•	`r disabled_or_combo`% are for disabled people
+•	`r no_target`% of units have no specific target
 
-Out of all `r pz_affordable_units` affordable units in the Promise Zone, `r less_than_five_exp[1]` are due to expire in the next 5 years. Another `r five_to_ten_exp[1]` will expire in 6 to 10 years, and `r ten_to_twenty_exp[1]` in 11 to 20 years, and `r twenty_one_plus[1]` in 21 years or later. A total of `r no_exp` have no expiration date.
+Expiration timeline:
+•	Next 5 years: `r less_than_five_exp[1]` units
+•	6 to 10 years: `r five_to_ten_exp[1]` units
+•	11 to 20 years: `r ten_to_twenty_exp[1]` units
+•	21 years or later: `r twenty_one_plus[1]` units
+•	No expiration date: `r no_exp` units
 
 # 6) Putting It Together
 Once you have all these pieces ready to go, you can upload the relevant pieces to ArcGIS and then assemble everything in the StoryMap.
 
-## i) Uploading and Formatting NHPD Shapefiles
+This will require you to create five separate components:
+
+1) the NHPD map
+2) the rent burden map
+3) the residential construction permits map
+4) the various graphics
+5) the dashboard text
+
+Once you have created these, you can upload them as appropriate to the ArcGIS storymap and format them as you see fit. This may change a bit each time you make the map, and you may have to do some fiddling with the visualizations; what I've created here can certainly be improved.
+
+### i) Creating the NHPD Map
+The NHPD map is the most complicated part of the dsahboard. You'll have to take the shapefile created earlier in this script and upload it to ArcGIS Pro. You can then push the resulting layer to an ArcGIS Online webmap. That webmap can be turned into a dashboard which, when properly formatted, can then be embedded in the final storymap.
+
+*Uploading the shapefile*
+
 1. Open ArcGIS Pro
 2. Start a new, blank project
 3. In the "Contents" section, right click the basemap layers and remove them.
@@ -318,16 +364,85 @@ Once you have all these pieces ready to go, you can upload the relevant pieces t
 6. Right click the phl_nhpd_full layer and select "Symbology". Set the primary symbology to "proportional symbols", and the field to "ttl_nts" (originally "total_units"--remember that Esri shapefiles have limits to the length of column names, so it will automatically trim them). Set the minimum size to 5 and the max size to 50. Save.
 7. Click on "vary symbology by attribute", then open the "color" subtab and change "field" to "erlst_ (originally "earliest_end_year"). Set the color scheme to yellow-green-blue. Then, next to "template", right click the little dot and, under "color properties", set "transparency" to 50%. Finally, make sure to check the box for "show legend". Don't forget to save.
 8. Right click on "Map" under contents, and then select "Properties". Under "general", make sure to check off "Allow assignment of unique numeric IDs for sharing web layers".
-9. Repea steps 4 through 8 for phl_nhpd_non_expiring, except do NOT add the "vary symbolgy by attribute" with the color setting. Just make the color for all of these points gray. (Do this by click the dot next to "Template"). 
-9. Navigate to the "Share" tab and click "Web Layer" (NOT "Web Map"). Set the name to something like NHPD Housing for Dashboard and the summary to something like "Data from the National Housing Preservation Database cleaned and formatted for a Promise Zone dashboard." Tags might include "Promise Zone", "Housing", etc. Set the layer type to "feature". Set the location to your folder, and set sharing to Everyone and City of Philadelphia, and then click "publish".
-10. In your browser, navigate to phl.maps.arcgis.com and go to "content". Open the layer you just created ("NHPD Housing for Dashboard") in Map Viewer. Title the map "NHPD Housing for Dashboard" and save. 
-11. A city basemap should automatically be present. You'll also want to add the Promise Zone boundaries. Do this by going to "Add", then "search for layers". Select "my organization" and search for "Promise Zone". Select the "Philadelphia_Promise_Zone" layer uploaded by maps.phl.data. Navigate to the "Details" tab and drag the housing layer to be on top of the Promise Zone layer. Save. 
-12. Click on the "home" tab in the top left corner. Next, click the little square of nine dots just next to your profile picture in the top right corner of the screen. Select "Dashboards", and then "create dashboard." Name it something like "NHPD Housing Dashboard (June 2022)", and add the tags "Promise Zone" and "Housing".
-13. Click the plus sign in middle of your dashboard template, and then select the "NHPD Housing for Dashboard" web map that you created in steps 10 and 11. In settings, turn on popups, the legend, and the search and zoom features. Click done and then save the dashboard.
-14. 
+9. Repeat steps 4 through 8 for phl_nhpd_non_expiring, except do NOT add the "vary symbolgy by attribute" with the color setting. Just make the color for all of these points gray. (Do this by click the dot next to "Template"). 
+10. Navigate to the "Share" tab and click "Web Layer" (NOT "Web Map"). Set the name to something like NHPD Housing for Dashboard and the summary to something like "Data from the National Housing Preservation Database cleaned and formatted for a Promise Zone dashboard." Tags might include "Promise Zone", "Housing", etc. Set the layer type to "feature". Set the location to your folder, and set sharing to Everyone and City of Philadelphia, and then click "publish".
 
-## ii) Uploading Graphics
+*Push the layer to ArcGIS Online*
 
-## iii) Adding Text
+11. In your browser, navigate to phl.maps.arcgis.com and go to "content". Open the layer you just created ("NHPD Housing for Dashboard") in Map Viewer. Title the map "NHPD Housing for Dashboard" and save. 
+12. A city basemap should automatically be present. You'll also want to add the Promise Zone boundaries. Do this by going to "Add", then "search for layers". Select "my organization" and search for "Promise Zone". Select the "Philadelphia_Promise_Zone" layer uploaded by maps.phl.data. Navigate to the "Details" tab and drag the housing layer to be on top of the Promise Zone layer. Save. 
 
-## iv) Publishing the Dashboard
+*Turning the webmap into a dashboard*
+
+13. Click on the "home" tab in the top left corner. Next, click the little square of nine dots just next to your profile picture in the top right corner of the screen. Select "Dashboards", and then "create dashboard." Name it something like "NHPD Housing Dashboard (June 2022)", and add the tags "Promise Zone" and "Housing".
+14. Click the plus sign in middle of your dashboard template, and then select the "NHPD Housing for Dashboard" web map that you created in steps 10 and 11. In settings, turn on popups, the legend, and the search and zoom features. Click done and then save the dashboard.
+15. Click "add element" in the top lefthand corner. Add a header with a title, and add a sidebar with a map legend.
+16. In the header, add two number selectors:
+  -In the first one, set label to "Expiration date range:". Set display type to "slider" and input type to "range". Limits should be from "statistic", and the field for limits should be "earliest expiration year". Under the "actions" tab, set the selector to filter the "expiring affordable housing" map layer. Save.
+  -In the second one, set the label to "total units", display type to "spinner", and input type to "range". Limits can be "none", with lwoer default set to 0 and upper default set to 1000. Under "actions", set the filter to both the expiring and non-expiring housing layers. Save.
+17. Save the dashboard. Make sure its sharing is set to public. Publish. Copy the link to it.
+-Embed the dashboard link in the housing storymap. Move it to where you want it.
+
+
+
+### ii) Creating the Rent Burden Map
+
+Creating the construction permit map can be done entirely in ArcGIS Online: 
+
+1) Open a new map. 
+2) Under "add data", search in "living atlas" for "rent burden". Select the "ACS Housing Costs Variables - Boundaries" layer published by esri_demographics. Add it to the map. 
+3) Filter the layer so that County contains "Philadelphia County".
+4) Set the symbology to "Counts and Amounts". Set the attribute to show to "Percent of Renter Households for whom Gross Rent (Contract Rent Plus Tenant-Paid Utilities) is 30.0 Percent or More of Household Income". Set the theme to "high to low" and the fill spectrum to yellow to blue. Set the outline color to white and the thickness to 1 pt.
+5) Add the Promise Zone layer: select "my organization" and search for "Promise Zone". Select the "Philadelphia_Promise_Zone" layer uploaded by maps.phl.data.
+6) Turn off popups for the PZ layer by right-clicking the elipses next to it under "content" and selecting "no popup". 
+7) Save the map. 
+8) Navigate to your ArcGIS profile. Click on the little box with nine dots in the top righthand corner of the screen and select "dashboards". Click "create dashboard". Title the dashboard something like "Promise Zone rent burden". Click "create dashboard".
+9) Click the add button in the middle of the screen. Add the construction permits web map. 
+10) Click "add element" on the left side of the screen. First, you'll add a header with a title. Then, you'll add a legend. 
+11) Save the dashboard.
+12) Make sure the sharing is set to public. Share the dashboard, then copy the link to it.
+13) Embed the dashboard link in the housing storymap. Move it to where you want it.
+14) To set the appropriate map zoom level, simply save the web map to the desired map extent. This will automatically update the StoryMap. There’s no way to sync the map extent across separate web maps, though.
+
+### iii) Creating the Construction Permit Map
+
+Creating the construction permit map can be done entirely in ArcGIS Online: 
+
+1) Open a new map. 
+2) Under "add data", search in "my organization" for "construction permits". Select the "PERMITS" layer published by the Department of Licenses & Inspections. Add it to the map. 
+3) Filter the layer so that PERMITDESCRIPTION contains "residential building" and TYPEOFWORK contains "new construction". 
+4) Set the symbology to "heat map". 
+5) Add the Promise Zone layer: select "my organization" and search for "Promise Zone". Select the "Philadelphia_Promise_Zone" layer uploaded by maps.phl.data.
+6) Turn off popups for the PZ layer by right-clicking the elipses next to it under "content" and selecting "no popup". 
+7) Save the map. 
+8) Navigate to your ArcGIS profile. Click on the little box with nine dots in the top righthand corner of the screen and select "dashboards". Click "create dashboard". Title the dashboard something like "Promise Zone residential construction permits". Click "create dashboard".
+9) click the add button in the middle of the screen. Add the construction permits web map. 
+10) click "add element" on the left side of the screen. First, you'll add a header with a title. Then, you'll add a legend. Finally, you'll add a rich text element where you can include text that explains the dashboard. Currently, this element reads: "This heat map indicates areas of high residential construction activity. This includes only new construction, not modifications to existing structures, and covers both single and multi-family buildings." However, this can definitely be improved.
+11) Save the dashboard.
+12) Make sure the sharing is set to public. Share the dashboard, then copy the link to it.
+13) Embed the dashboard link in the housing storymap. Move it to where you want it.
+14) To set the appropriate map zoom level, simply save the web map to the desired map extent. This will automatically update the StoryMap. There’s no way to sync the map extent across separate web maps, though.
+
+### iv) Uploading Graphics
+To take graphics from this markdown document to the storymap, right click on them in the markdown and select "save as". Name them, making sure that the filename ends in ".png". You can then upload the resulting .png files directly to the storymap and place them where you want to. If you want to edit the graphics, you can change the underlying R script.
+
+### v) Adding Text
+Finally, you can take the text from above in this walkthrough (section 5) and paste it into the storymap as appropriate. If you decide to edit the text for future versions of the webmap, make sure that you also edit this markdown document accordingly so that your edits are reproducible the next time you update the storymap.
+
+### vi) Publishing the Dashboard
+Finally, you'll want to publish the storymap, which you can do by clicking "publish" in the top righthand corner of the storymap editor. When you do this, make sure that the dashboard itself, as well as all the underlying parts, are set to public sharing. If the dashboard is public but the makes that make it up are *not* set to public sharing, then viewers will not be able to see all elements of the map.
+
+# 7) Outstanding Issues
+The issues below remain to be fixed. Some of them can be solved with some persistence; others are simply not worth the effort. You'll have to gauge the combined abilities of the dashboards team and your own comfort with tools like Adobe Illustrator and Photoshop in order to decide what you want to work on. 
+
+*Issues that can be fixed now:*
+
+1) The NHPD point map legend currently does not show a color spectrum for expiration dates for the expiring housing layer. I think this might need to be fixed in ArcGIS Pro before pushing it to a web layer, but I'm not sure how.
+2) The year data for the NHPD point map show up in ArcGIS as numerics, not dates, meaning them appear with commas (e.g., 2,022 instead of 2022). This is a problem with Esri shapefiles, I believe, which automatically convert certain datatypes. You can probably fix this in ArcGIS Pro before pushing the layer to a webmap.
+3) The titles of the embedded dashboards could be made more precise.
+4) All the maps need clearer instructions for how to use them. Consider adding these in the dashboards themselves, rather than above or below as plain text.
+
+*Issues that can't yet be fixed:*
+
+1) The Promise Zone boundary is still wrong. City Planning is supposedly working on fixing them. Follow up with them to see if anything has moved forward.
+2) There's currently no straightforward way to improve the map legends. You could try doing this using something like Adobe Illustrator or Photoshop, which I believe is the standard approach in cases like this, but honestly it's probably not worth your time for a dashboard that so few people will see.
